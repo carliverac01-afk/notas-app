@@ -44,6 +44,10 @@ public class NotesRepository {
         return session.isLoggedIn();
     }
 
+    public UserSession getUserSession() {
+        return session.getUserSession();
+    }
+
     public void logout() {
         session.logout();
     }
@@ -219,7 +223,10 @@ public class NotesRepository {
         if (!response.isSuccessful() || response.body() == null || response.body().accessToken == null) {
             throw new IOException(apiErrorMessage(response, fallbackMessage));
         }
-        session.saveToken(response.body().accessToken);
+        AuthResponse authResponse = response.body();
+        String name = authResponse.user == null ? "" : authResponse.user.name;
+        String email = authResponse.user == null ? "" : authResponse.user.email;
+        session.saveSession(authResponse.accessToken, name, email);
     }
 
     private void requireInternetForAuth() throws IOException {

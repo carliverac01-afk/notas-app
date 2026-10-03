@@ -1,8 +1,11 @@
 package com.example.notesandroid;
 
+import android.Manifest;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.location.Location;
+import android.location.LocationManager;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.text.TextUtils;
 import android.view.View;
 import android.widget.Button;
@@ -11,21 +14,21 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import android.app.Activity;
+import androidx.activity.ComponentActivity;
+import androidx.annotation.NonNull;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import androidx.lifecycle.ViewModelProvider;
 
 import com.example.notesandroid.data.NoteEntity;
-import com.example.notesandroid.repository.NetworkUtils;
-import com.example.notesandroid.repository.NotesRepository;
+import com.example.notesandroid.repository.UserSession;
 
-import java.io.IOException;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
-public class MainActivity extends Activity {
-    private NotesRepository repository;
-    private ExecutorService executor;
-    private Handler mainHandler;
+public class MainActivity extends ComponentActivity {
+    private static final int LOCATION_PERMISSION_REQUEST = 50;
+
+    private NotesViewModel viewModel;
 
     private LinearLayout authSection;
     private LinearLayout notesSection;
@@ -36,6 +39,9 @@ public class MainActivity extends Activity {
     private EditText titleInput;
     private EditText contentInput;
     private TextView statusText;
+    private TextView userNameText;
+    private TextView userEmailText;
+    private TextView locationText;
     private Button saveNoteButton;
 
     private NoteEntity editingNote;
@@ -45,25 +51,11 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        repository = new NotesRepository(this);
-        executor = Executors.newSingleThreadExecutor();
-        mainHandler = new Handler(Looper.getMainLooper());
+        viewModel = new ViewModelProvider(this).get(NotesViewModel.class);
 
         bindViews();
         configureActions();
-
-        if (repository.isLoggedIn()) {
-            showNotes();
-            loadNotes();
-        } else {
-            showAuth();
-        }
-    }
-
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        executor.shutdown();
+        observeState();
     }
 
     private void bindViews() {
@@ -76,6 +68,9 @@ public class MainActivity extends Activity {
         titleInput = findViewById(R.id.titleInput);
         contentInput = findViewById(R.id.contentInput);
         statusText = findViewById(R.id.statusText);
+        userNameText = findViewById(R.id.userNameText);
+        userEmailText = findViewById(R.id.userEmailText);
+        locationText = findViewById(R.id.locationText);
         saveNoteButton = findViewById(R.id.saveNoteButton);
     }
 
@@ -83,10 +78,31 @@ public class MainActivity extends Activity {
         findViewById(R.id.loginButton).setOnClickListener(view -> login());
         findViewById(R.id.registerButton).setOnClickListener(view -> register());
         findViewById(R.id.saveNoteButton).setOnClickListener(view -> saveNote());
-        findViewById(R.id.syncButton).setOnClickListener(view -> loadNotes());
+        findViewById(R.id.syncButton).setOnClickListener(view -> viewModel.loadNotes());
+        findViewById(R.id.locationButton).setOnClickListener(view -> requestLocationWhenNeeded());
         findViewById(R.id.logoutButton).setOnClickListener(view -> {
-            repository.logout();
-            showAuth();
+            clearForm();
+            clearLocation();
+            viewModel.logout();
+        });
+    }
+
+    private void observeState() {
+        viewModel.authenticated().observe(this, authenticated -> {
+            if (Boolean.TRUE.equals(authenticated)) {
+                showNotes();
+            } else {
+                showAuth();
+            }
+        });
+
+        viewModel.userSession().observe(this, this::renderUser);
+        viewModel.notes().observe(this, this::renderNotes);
+        viewModel.status().observe(this, status -> statusText.setText(status == null ? "" : status));
+        viewModel.message().observe(this, message -> {
+            if (message != null && !message.isBlank()) {
+                toast(message);
+            }
         });
     }
 
@@ -99,14 +115,7 @@ public class MainActivity extends Activity {
             return;
         }
 
-        runTask("Iniciando sesion...", () -> {
-            repository.login(email, password);
-            mainHandler.post(() -> {
-                toast("Sesion iniciada");
-                showNotes();
-                loadNotes();
-            });
-        });
+        viewModel.login(email, password);
     }
 
     private void register() {
@@ -119,14 +128,7 @@ public class MainActivity extends Activity {
             return;
         }
 
-        runTask("Registrando usuario...", () -> {
-            repository.register(name, email, password);
-            mainHandler.post(() -> {
-                toast("Perfil creado correctamente");
-                showNotes();
-                loadNotes();
-            });
-        });
+        viewModel.register(name, email, password);
     }
 
     private void saveNote() {
@@ -138,40 +140,25 @@ public class MainActivity extends Activity {
             return;
         }
 
-        runTask("Guardando nota...", () -> {
-            if (editingNote == null) {
-                repository.createNote(title, content);
-            } else {
-                repository.updateNote(editingNote, title, content);
-            }
-            mainHandler.post(() -> {
-                toast(editingNote == null ? "Nota creada" : "Nota actualizada");
-                clearForm();
-                loadNotes();
-            });
-        });
+        viewModel.saveNote(editingNote, title, content);
+        clearForm();
     }
 
-    private void loadNotes() {
-        setStatus(NetworkUtils.hasInternet(this) ? "Con conexion: sincronizando" : "Sin conexion: mostrando notas locales");
-        executor.execute(() -> {
-            try {
-                List<NoteEntity> notes = repository.getNotes();
-                mainHandler.post(() -> renderNotes(notes));
-            } catch (IOException exception) {
-                mainHandler.post(() -> {
-                    toast(exception.getMessage());
-                    setStatus("No se pudo sincronizar. Se mantienen las notas locales.");
-                });
-            }
-        });
+    private void renderUser(UserSession userSession) {
+        if (userSession == null) {
+            userNameText.setText("");
+            userEmailText.setText("");
+            return;
+        }
+
+        userNameText.setText("Hola, " + userSession.displayName());
+        userEmailText.setText(userSession.email == null ? "" : userSession.email);
     }
 
     private void renderNotes(List<NoteEntity> notes) {
         notesContainer.removeAllViews();
-        setStatus(NetworkUtils.hasInternet(this) ? "Notas sincronizadas" : "Modo offline");
 
-        if (notes.isEmpty()) {
+        if (notes == null || notes.isEmpty()) {
             TextView empty = simpleText("No tienes notas guardadas.");
             notesContainer.addView(empty);
             return;
@@ -214,7 +201,7 @@ public class MainActivity extends Activity {
 
         Button deleteButton = new Button(this);
         deleteButton.setText("Eliminar");
-        deleteButton.setOnClickListener(view -> deleteNote(note));
+        deleteButton.setOnClickListener(view -> viewModel.deleteNote(note));
 
         actions.addView(editButton);
         actions.addView(deleteButton);
@@ -233,14 +220,64 @@ public class MainActivity extends Activity {
         saveNoteButton.setText("Actualizar nota");
     }
 
-    private void deleteNote(NoteEntity note) {
-        runTask("Eliminando nota...", () -> {
-            repository.deleteNote(note);
-            mainHandler.post(() -> {
-                toast("Nota eliminada");
-                loadNotes();
-            });
-        });
+    private void requestLocationWhenNeeded() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED) {
+            showSingleLocation();
+            return;
+        }
+
+        ActivityCompat.requestPermissions(
+                this,
+                new String[]{Manifest.permission.ACCESS_FINE_LOCATION},
+                LOCATION_PERMISSION_REQUEST
+        );
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode,
+            @NonNull String[] permissions,
+            @NonNull int[] grantResults
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == LOCATION_PERMISSION_REQUEST) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                showSingleLocation();
+            } else {
+                locationText.setText("Permiso de ubicacion denegado");
+            }
+        }
+    }
+
+    private void showSingleLocation() {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+
+        LocationManager locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        if (locationManager == null) {
+            locationText.setText("No se pudo acceder al servicio de ubicacion");
+            return;
+        }
+
+        Location location = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+        if (location == null) {
+            location = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
+        }
+
+        if (location == null) {
+            locationText.setText("Ubicacion no disponible por ahora");
+            return;
+        }
+
+        String text = String.format(
+                "Ubicacion: %.5f, %.5f",
+                location.getLatitude(),
+                location.getLongitude()
+        );
+        locationText.setText(text);
     }
 
     private void clearForm() {
@@ -248,6 +285,10 @@ public class MainActivity extends Activity {
         titleInput.setText("");
         contentInput.setText("");
         saveNoteButton.setText("Guardar nota");
+    }
+
+    private void clearLocation() {
+        locationText.setText("");
     }
 
     private void showAuth() {
@@ -259,20 +300,6 @@ public class MainActivity extends Activity {
     private void showNotes() {
         authSection.setVisibility(View.GONE);
         notesSection.setVisibility(View.VISIBLE);
-    }
-
-    private void runTask(String status, BackgroundTask task) {
-        setStatus(status);
-        executor.execute(() -> {
-            try {
-                task.run();
-            } catch (Exception exception) {
-                mainHandler.post(() -> {
-                    toast(exception.getMessage());
-                    setStatus("Operacion no completada");
-                });
-            }
-        });
     }
 
     private TextView simpleText(String value) {
@@ -287,19 +314,11 @@ public class MainActivity extends Activity {
         return editText.getText().toString().trim();
     }
 
-    private void setStatus(String message) {
-        statusText.setText(message);
-    }
-
     private void toast(String message) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
     }
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
-    }
-
-    private interface BackgroundTask {
-        void run() throws Exception;
     }
 }
